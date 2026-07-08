@@ -138,6 +138,44 @@ pub fn entropy_bits(alphabet_size: usize, length: usize) -> f64 {
     (alphabet_size as f64).log2() * length as f64
 }
 
+/// Assumed attacker speed for crack-time estimates: a well-resourced offline
+/// attack running ten billion guesses per second.
+const CRACK_GUESSES_PER_SECOND: f64 = 1e10;
+
+const SECONDS_PER_YEAR: f64 = 31_557_600.0;
+
+/// Human-readable average time to brute-force a secret with `bits` of entropy
+/// at [`CRACK_GUESSES_PER_SECOND`]. Average means half the keyspace searched.
+pub fn crack_time(bits: f64) -> String {
+    let seconds = bits.exp2() / 2.0 / CRACK_GUESSES_PER_SECOND;
+    let years = seconds / SECONDS_PER_YEAR;
+    if seconds < 1.0 {
+        String::from("instantly")
+    } else if seconds < 60.0 {
+        format!("{seconds:.0} seconds")
+    } else if seconds < 3_600.0 {
+        format!("{:.0} minutes", seconds / 60.0)
+    } else if seconds < 86_400.0 {
+        format!("{:.0} hours", seconds / 3_600.0)
+    } else if years < 1.0 {
+        format!("{:.0} days", seconds / 86_400.0)
+    } else if years < 100.0 {
+        format!("{years:.0} years")
+    } else if years < 10_000.0 {
+        format!("{:.0} centuries", years / 100.0)
+    } else if years < 1e6 {
+        format!("{:.0} thousand years", years / 1e3)
+    } else if years < 1e9 {
+        format!("{:.0} million years", years / 1e6)
+    } else if years < 1e12 {
+        format!("{:.0} billion years", years / 1e9)
+    } else if years < 1e15 {
+        format!("{:.0} trillion years", years / 1e12)
+    } else {
+        format!("10^{:.0} years", years.log10().floor())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +282,18 @@ mod tests {
         assert_eq!(title_case("brave"), "Brave");
         assert_eq!(title_case("OTTER"), "OTTER");
         assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn crack_time_scales_through_the_unit_ladder() {
+        assert_eq!(crack_time(0.0), "instantly");
+        // 2^40 / 2 / 1e10 = ~55 seconds.
+        assert_eq!(crack_time(40.0), "55 seconds");
+        // 2^50 / 2 / 1e10 = ~16 hours.
+        assert_eq!(crack_time(50.0), "16 hours");
+        // Full-charset defaults land far beyond named units.
+        assert!(crack_time(128.0).starts_with("10^"));
+        assert!(crack_time(80.0).contains("years") || crack_time(80.0).contains("centuries"));
     }
 
     #[test]

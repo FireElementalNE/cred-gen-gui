@@ -286,6 +286,14 @@ fn strength_meter(ui: &mut egui::Ui, charset: Charset, length: usize) {
             .fill(color)
             .text(format!("{label} · {bits:.0} bits")),
     );
+    ui.label(
+        egui::RichText::new(format!(
+            "Est. crack time: {} (at 10¹⁰ guesses/sec)",
+            generator::crack_time(bits)
+        ))
+        .small()
+        .weak(),
+    );
 }
 
 fn apply_text_style(ctx: &egui::Context) {
