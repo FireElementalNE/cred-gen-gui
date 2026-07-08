@@ -128,6 +128,28 @@ impl App {
         self.generation_task.is_some()
     }
 
+    /// Space/Enter regenerates, Ctrl+C (Cmd+C on macOS) copies the password.
+    /// Suppressed while a text field (e.g. the API key) has keyboard focus so
+    /// typing spaces or copying selected text keeps working.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (regenerate, copy) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter),
+                i.modifiers.command && i.key_pressed(egui::Key::C),
+            )
+        });
+        if regenerate {
+            self.start_regeneration();
+        }
+        if copy && !self.password.is_empty() {
+            ctx.copy_text(self.password.clone());
+            self.copy_feedback = Some((String::from("Password"), Instant::now()));
+        }
+    }
+
     /// Drop the copy confirmation once it has been shown long enough.
     fn expire_copy_feedback(&mut self, ctx: &egui::Context) {
         if let Some((_, since)) = &self.copy_feedback {
@@ -150,6 +172,7 @@ impl eframe::App for App {
         apply_text_style(ui.ctx());
         self.poll_generation(ui.ctx());
         self.expire_copy_feedback(ui.ctx());
+        self.handle_shortcuts(ui.ctx());
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -279,6 +302,14 @@ impl eframe::App for App {
             if generate {
                 self.start_regeneration();
             }
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("Space/Enter — regenerate · Ctrl+C — copy password")
+                        .small()
+                        .weak(),
+                );
+            });
         });
 
         if self.is_generating() {
