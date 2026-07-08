@@ -12,11 +12,15 @@ CLI pet project.
 - Guarantees at least one character from each enabled class
 - Live entropy estimate and strength meter
 - One-click copy to clipboard
+- Optional Random.org entropy mixing (remote seed is SHA-256-mixed with OS
+  randomness, never used alone)
 
 ```sh
 cargo run --release
 ```
 
-> Built for fun and learning. Uses `rand`'s `ThreadRng` (a CSPRNG), but audit
-> before trusting it with anything that matters.
+> Built for fun and learning. Generation draws from the OS CSPRNG (`rand`'s
+> `SysRng`); with the Random.org option enabled, a remote seed is hashed
+> together with OS randomness to seed a `StdRng`. Audit before trusting it
+> with anything that matters.
 
