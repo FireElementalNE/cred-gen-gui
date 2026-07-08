@@ -10,9 +10,28 @@ use crate::generator::{self, Charset};
 const RANDOM_ORG_URL: &str = "https://api.random.org/json-rpc/4/invoke";
 const RANDOM_ORG_SEED_BITS: usize = 256;
 
+/// Separator choices offered for passphrases.
+const PASSPHRASE_SEPARATORS: [(char, &str); 4] = [
+    ('-', "- hyphen"),
+    ('_', "_ underscore"),
+    ('.', ". period"),
+    (' ', "space"),
+];
+
+/// Which kind of secret to generate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretMode {
+    Password,
+    Passphrase,
+}
+
 pub struct App {
+    mode: SecretMode,
     charset: Charset,
     length: usize,
+    passphrase_words: usize,
+    passphrase_separator: char,
+    passphrase_capitalize: bool,
     with_username: bool,
     username_digits: usize,
     style_initialized: bool,
@@ -27,8 +46,12 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         let mut app = Self {
+            mode: SecretMode::Password,
             charset: Charset::default(),
             length: 20,
+            passphrase_words: 5,
+            passphrase_separator: '-',
+            passphrase_capitalize: true,
             with_username: true,
             username_digits: 0,
             style_initialized: false,
@@ -51,8 +74,12 @@ impl App {
         }
 
         let settings = GenerationSettings {
+            mode: self.mode,
             charset: self.charset,
             length: self.length,
+            passphrase_words: self.passphrase_words,
+            passphrase_separator: self.passphrase_separator,
+            passphrase_capitalize: self.passphrase_capitalize,
             with_username: self.with_username,
             username_digits: self.username_digits,
             use_random_org: self.use_random_org,
@@ -116,7 +143,15 @@ impl eframe::App for App {
             }
 
             ui.add_space(8.0);
-            strength_meter(ui, self.charset, self.length);
+            let bits = match self.mode {
+                SecretMode::Password => {
+                    generator::entropy_bits(self.charset.alphabet_size(), self.length)
+                }
+                SecretMode::Passphrase => {
+                    generator::passphrase_entropy_bits(self.passphrase_words)
+                }
+            };
+            strength_meter(ui, bits);
             ui.add_space(12.0);
             ui.separator();
 
@@ -124,25 +159,59 @@ impl eframe::App for App {
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("Length");
-                    ui.add(egui::Slider::new(&mut self.length, 4..=128));
-                    ui.end_row();
-
-                    ui.label("Include");
+                    ui.label("Mode");
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.charset.lowercase, "a-z");
-                        ui.checkbox(&mut self.charset.uppercase, "A-Z");
-                        ui.checkbox(&mut self.charset.digits, "0-9");
-                        ui.checkbox(&mut self.charset.symbols, "!@#");
+                        ui.selectable_value(&mut self.mode, SecretMode::Password, "Password");
+                        ui.selectable_value(&mut self.mode, SecretMode::Passphrase, "Passphrase");
                     });
                     ui.end_row();
 
-                    ui.label("");
-                    ui.checkbox(
-                        &mut self.charset.exclude_ambiguous,
-                        "Exclude look-alikes (Il1O0o)",
-                    );
-                    ui.end_row();
+                    match self.mode {
+                        SecretMode::Password => {
+                            ui.label("Length");
+                            ui.add(egui::Slider::new(&mut self.length, 4..=128));
+                            ui.end_row();
+
+                            ui.label("Include");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.charset.lowercase, "a-z");
+                                ui.checkbox(&mut self.charset.uppercase, "A-Z");
+                                ui.checkbox(&mut self.charset.digits, "0-9");
+                                ui.checkbox(&mut self.charset.symbols, "!@#");
+                            });
+                            ui.end_row();
+
+                            ui.label("");
+                            ui.checkbox(
+                                &mut self.charset.exclude_ambiguous,
+                                "Exclude look-alikes (Il1O0o)",
+                            );
+                            ui.end_row();
+                        }
+                        SecretMode::Passphrase => {
+                            ui.label("Words");
+                            ui.add(egui::Slider::new(&mut self.passphrase_words, 3..=10));
+                            ui.end_row();
+
+                            ui.label("Separator");
+                            egui::ComboBox::from_id_salt("passphrase_separator")
+                                .selected_text(separator_label(self.passphrase_separator))
+                                .show_ui(ui, |ui| {
+                                    for (separator, label) in PASSPHRASE_SEPARATORS {
+                                        ui.selectable_value(
+                                            &mut self.passphrase_separator,
+                                            separator,
+                                            label,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("");
+                            ui.checkbox(&mut self.passphrase_capitalize, "Capitalize words");
+                            ui.end_row();
+                        }
+                    }
 
                     ui.label("Username");
                     ui.horizontal(|ui| {
@@ -195,8 +264,12 @@ struct GenerationTask {
 
 #[derive(Clone)]
 struct GenerationSettings {
+    mode: SecretMode,
     charset: Charset,
     length: usize,
+    passphrase_words: usize,
+    passphrase_separator: char,
+    passphrase_capitalize: bool,
     with_username: bool,
     username_digits: usize,
     use_random_org: bool,
@@ -240,7 +313,18 @@ fn generate_with(
     entropy_status: String,
 ) -> GeneratedCredentials {
     GeneratedCredentials {
-        password: generator::password(settings.charset, settings.length, rng).unwrap_or_default(),
+        password: match settings.mode {
+            SecretMode::Password => {
+                generator::password(settings.charset, settings.length, rng).unwrap_or_default()
+            }
+            SecretMode::Passphrase => generator::passphrase(
+                settings.passphrase_words,
+                settings.passphrase_separator,
+                settings.passphrase_capitalize,
+                rng,
+            )
+            .unwrap_or_default(),
+        },
         username: if settings.with_username {
             generator::username(settings.username_digits, rng)
         } else {
@@ -272,8 +356,14 @@ fn credential_row(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
-fn strength_meter(ui: &mut egui::Ui, charset: Charset, length: usize) {
-    let bits = generator::entropy_bits(charset.alphabet_size(), length);
+fn separator_label(separator: char) -> &'static str {
+    PASSPHRASE_SEPARATORS
+        .iter()
+        .find(|(c, _)| *c == separator)
+        .map_or("?", |(_, label)| label)
+}
+
+fn strength_meter(ui: &mut egui::Ui, bits: f64) {
     let (label, color) = match bits as u32 {
         0..=39 => ("Weak", egui::Color32::from_rgb(0xE0, 0x3C, 0x3C)),
         40..=71 => ("Fair", egui::Color32::from_rgb(0xE0, 0xA0, 0x30)),
@@ -395,8 +485,12 @@ mod tests {
     #[test]
     fn generate_credentials_uses_os_randomness() {
         let credentials = generate_credentials(GenerationSettings {
+            mode: SecretMode::Password,
             charset: Charset::default(),
             length: 20,
+            passphrase_words: 5,
+            passphrase_separator: '-',
+            passphrase_capitalize: true,
             with_username: true,
             username_digits: 2,
             use_random_org: false,
@@ -416,10 +510,34 @@ mod tests {
     }
 
     #[test]
+    fn generate_credentials_in_passphrase_mode() {
+        let credentials = generate_credentials(GenerationSettings {
+            mode: SecretMode::Passphrase,
+            charset: Charset::default(),
+            length: 20,
+            passphrase_words: 4,
+            passphrase_separator: '.',
+            passphrase_capitalize: false,
+            with_username: false,
+            username_digits: 0,
+            use_random_org: false,
+            random_org_api_key: String::new(),
+        });
+
+        let words: Vec<&str> = credentials.password.split('.').collect();
+        assert_eq!(words.len(), 4);
+        assert!(words.iter().all(|w| !w.is_empty()));
+    }
+
+    #[test]
     fn generate_credentials_falls_back_when_random_org_key_is_missing() {
         let credentials = generate_credentials(GenerationSettings {
+            mode: SecretMode::Password,
             charset: Charset::default(),
             length: 16,
+            passphrase_words: 5,
+            passphrase_separator: '-',
+            passphrase_capitalize: true,
             with_username: false,
             username_digits: 0,
             use_random_org: true,

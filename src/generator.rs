@@ -111,6 +111,48 @@ pub fn password(charset: Charset, length: usize, rng: &mut impl Rng) -> Option<S
     Some(out.into_iter().collect())
 }
 
+/// Draw one word uniformly from the combined adjective + noun pool, so each
+/// word contributes log2(pool size) bits regardless of part of speech.
+fn pool_word(rng: &mut impl Rng) -> &'static str {
+    let index = rng.random_range(0..ADJECTIVES.len() + NOUNS.len());
+    ADJECTIVES
+        .get(index)
+        .unwrap_or_else(|| &NOUNS[index - ADJECTIVES.len()])
+}
+
+/// A Diceware-style passphrase of `words` words drawn uniformly from the
+/// combined embedded word pool, joined by `separator`. Returns `None` if
+/// `words` is 0. Capitalization is applied uniformly and adds no entropy.
+pub fn passphrase(
+    words: usize,
+    separator: char,
+    capitalize: bool,
+    rng: &mut impl Rng,
+) -> Option<String> {
+    if words == 0 {
+        return None;
+    }
+    let parts: Vec<String> = (0..words)
+        .map(|_| {
+            let word = pool_word(rng);
+            if capitalize {
+                title_case(word)
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect();
+    Some(parts.join(&separator.to_string()))
+}
+
+/// Entropy in bits of a passphrase of `words` uniform draws from the pool.
+pub fn passphrase_entropy_bits(words: usize) -> f64 {
+    if words == 0 {
+        return 0.0;
+    }
+    ((ADJECTIVES.len() + NOUNS.len()) as f64).log2() * words as f64
+}
+
 /// A memorable `AdjectiveNoun` username, optionally suffixed with random digits.
 pub fn username(suffix_digits: usize, rng: &mut impl Rng) -> String {
     let adj = ADJECTIVES.choose(rng).map_or("brave", String::as_str);
@@ -222,6 +264,40 @@ mod tests {
             let pw = password(cs, 32, &mut rng).unwrap();
             assert!(pw.chars().all(|c| !AMBIGUOUS.contains(c)));
         }
+    }
+
+    #[test]
+    fn passphrase_has_word_count_and_separator() {
+        let mut rng = rand::rng();
+        let phrase = passphrase(4, '-', false, &mut rng).unwrap();
+        let parts: Vec<&str> = phrase.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert!(parts.iter().all(|w| !w.is_empty()));
+        assert!(parts.iter().all(|w| w.chars().all(char::is_alphabetic)));
+    }
+
+    #[test]
+    fn passphrase_capitalizes_each_word() {
+        let mut rng = rand::rng();
+        let phrase = passphrase(5, ' ', true, &mut rng).unwrap();
+        for word in phrase.split(' ') {
+            assert!(word.chars().next().unwrap().is_uppercase());
+        }
+    }
+
+    #[test]
+    fn zero_word_passphrase_is_none() {
+        let mut rng = rand::rng();
+        assert!(passphrase(0, '-', true, &mut rng).is_none());
+    }
+
+    #[test]
+    fn passphrase_entropy_matches_pool_size() {
+        assert_eq!(passphrase_entropy_bits(0), 0.0);
+        let pool = (ADJECTIVES.len() + NOUNS.len()) as f64;
+        let expected = pool.log2() * 5.0;
+        assert!((passphrase_entropy_bits(5) - expected).abs() < 1e-9);
+        assert!(passphrase_entropy_bits(6) > passphrase_entropy_bits(5));
     }
 
     #[test]
