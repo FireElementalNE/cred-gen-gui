@@ -3,7 +3,7 @@ use rand::{Rng, SeedableRng, TryRng, rand_core::UnwrapErr, rngs::StdRng, rngs::S
 use sha2::{Digest, Sha256};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::generator::{self, Charset};
 
@@ -17,6 +17,11 @@ const PASSPHRASE_SEPARATORS: [(char, &str); 4] = [
     ('.', ". period"),
     (' ', "space"),
 ];
+
+/// How long the copy confirmation stays visible.
+const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
+
+const CONFIRM_GREEN: egui::Color32 = egui::Color32::from_rgb(0x4C, 0xAF, 0x50);
 
 /// Which kind of secret to generate.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +45,9 @@ pub struct App {
     entropy_status: String,
     password: String,
     username: String,
+    password_revealed: bool,
+    /// Which credential row was just copied, and when, for the confirmation.
+    copy_feedback: Option<(String, Instant)>,
     generation_task: Option<GenerationTask>,
 }
 
@@ -60,6 +68,8 @@ impl Default for App {
             entropy_status: String::from("Using OS randomness"),
             password: String::new(),
             username: String::new(),
+            password_revealed: true,
+            copy_feedback: None,
             generation_task: None,
         };
         app.start_regeneration();
@@ -117,6 +127,18 @@ impl App {
     fn is_generating(&self) -> bool {
         self.generation_task.is_some()
     }
+
+    /// Drop the copy confirmation once it has been shown long enough.
+    fn expire_copy_feedback(&mut self, ctx: &egui::Context) {
+        if let Some((_, since)) = &self.copy_feedback {
+            let elapsed = since.elapsed();
+            if elapsed >= COPY_FEEDBACK_DURATION {
+                self.copy_feedback = None;
+            } else {
+                ctx.request_repaint_after(COPY_FEEDBACK_DURATION - elapsed);
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -127,6 +149,7 @@ impl eframe::App for App {
         }
         apply_text_style(ui.ctx());
         self.poll_generation(ui.ctx());
+        self.expire_copy_feedback(ui.ctx());
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -137,9 +160,15 @@ impl eframe::App for App {
             });
             ui.add_space(8.0);
 
-            credential_row(ui, "Password", &self.password);
+            credential_row(
+                ui,
+                "Password",
+                &self.password,
+                Some(&mut self.password_revealed),
+                &mut self.copy_feedback,
+            );
             if self.with_username {
-                credential_row(ui, "Username", &self.username);
+                credential_row(ui, "Username", &self.username, None, &mut self.copy_feedback);
             }
 
             ui.add_space(8.0);
@@ -255,6 +284,9 @@ impl eframe::App for App {
         if self.is_generating() {
             show_generation_modal(ui.ctx());
         }
+        if let Some((label, _)) = &self.copy_feedback {
+            show_copy_toast(ui.ctx(), label);
+        }
     }
 }
 
@@ -345,15 +377,60 @@ fn show_generation_modal(ctx: &egui::Context) {
     });
 }
 
-/// A monospace credential field with a copy button.
-fn credential_row(ui: &mut egui::Ui, label: &str, value: &str) {
+/// A monospace credential field with a copy button, and for secrets a
+/// reveal/hide toggle. `revealed: None` means the value is always shown.
+fn credential_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    revealed: Option<&mut bool>,
+    copy_feedback: &mut Option<(String, Instant)>,
+) {
     ui.horizontal(|ui| {
-        if ui.button("📋").on_hover_text("Copy").clicked() {
+        let copied = copy_feedback.as_ref().is_some_and(|(l, _)| l == label);
+        let copy_button = if copied {
+            egui::Button::new(egui::RichText::new("✔").color(CONFIRM_GREEN))
+        } else {
+            egui::Button::new("📋")
+        };
+        let hover = if copied { "Copied!" } else { "Copy" };
+        if ui.add(copy_button).on_hover_text(hover).clicked() {
             ui.ctx().copy_text(value.to_owned());
+            *copy_feedback = Some((label.to_owned(), Instant::now()));
         }
+
+        let mut show_value = true;
+        if let Some(revealed) = revealed {
+            let toggle = if *revealed { "Hide" } else { "Show" };
+            if ui.small_button(toggle).clicked() {
+                *revealed = !*revealed;
+            }
+            show_value = *revealed;
+        }
+
         ui.label(format!("{label}:"));
-        ui.add(egui::Label::new(egui::RichText::new(value).monospace().size(16.0)).truncate());
+        let display = if show_value {
+            value.to_owned()
+        } else {
+            "•".repeat(value.chars().count())
+        };
+        ui.add(egui::Label::new(egui::RichText::new(display).monospace().size(16.0)).truncate());
     });
+}
+
+/// A transient bottom-anchored toast confirming what was copied.
+fn show_copy_toast(ctx: &egui::Context, label: &str) {
+    egui::Area::new(egui::Id::new("copy_toast"))
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -12.0])
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(CONFIRM_GREEN, "✔");
+                    ui.label(format!("{label} copied to clipboard"));
+                });
+            });
+        });
 }
 
 fn separator_label(separator: char) -> &'static str {
