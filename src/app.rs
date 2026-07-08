@@ -21,6 +21,16 @@ const PASSPHRASE_SEPARATORS: [(char, &str); 4] = [
 /// How long the copy confirmation stays visible.
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
 
+/// Quiet period after the last settings change before auto-regenerating,
+/// so dragging a slider doesn't fire a generation per frame.
+const AUTO_REGEN_DEBOUNCE: Duration = Duration::from_millis(350);
+
+/// The settings that shape the generated credentials, for change detection.
+/// Deliberately excludes the entropy-source settings (Random.org toggle and
+/// API key): those don't invalidate the current credentials, and reacting to
+/// them would fire a network request per keystroke while typing the key.
+type CredentialShape = (Charset, usize, SecretMode, usize, char, bool, bool, usize);
+
 const CONFIRM_GREEN: egui::Color32 = egui::Color32::from_rgb(0x4C, 0xAF, 0x50);
 
 /// Which kind of secret to generate.
@@ -48,6 +58,10 @@ pub struct App {
     password_revealed: bool,
     /// Which credential row was just copied, and when, for the confirmation.
     copy_feedback: Option<(String, Instant)>,
+    /// Settings as of the last frame; `None` until the first frame runs.
+    last_shape: Option<CredentialShape>,
+    /// When the most recent settings change happened, if a regen is pending.
+    regen_pending_since: Option<Instant>,
     generation_task: Option<GenerationTask>,
 }
 
@@ -70,6 +84,8 @@ impl Default for App {
             username: String::new(),
             password_revealed: true,
             copy_feedback: None,
+            last_shape: None,
+            regen_pending_since: None,
             generation_task: None,
         };
         app.start_regeneration();
@@ -95,11 +111,57 @@ impl App {
             use_random_org: self.use_random_org,
             random_org_api_key: self.random_org_api_key.clone(),
         };
+        let uses_random_org = settings.use_random_org;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let _ = sender.send(generate_credentials(settings));
         });
-        self.generation_task = Some(GenerationTask { receiver });
+        self.generation_task = Some(GenerationTask {
+            receiver,
+            uses_random_org,
+        });
+    }
+
+    fn credential_shape(&self) -> CredentialShape {
+        (
+            self.charset,
+            self.length,
+            self.mode,
+            self.passphrase_words,
+            self.passphrase_separator,
+            self.passphrase_capitalize,
+            self.with_username,
+            self.username_digits,
+        )
+    }
+
+    /// Regenerate automatically once the settings have been stable for the
+    /// debounce window. Each further change restarts the timer; if a task is
+    /// already running when the timer fires, the regen stays pending and
+    /// retries once that task completes.
+    fn maybe_auto_regenerate(&mut self, ctx: &egui::Context) {
+        let shape = self.credential_shape();
+        match self.last_shape {
+            None => self.last_shape = Some(shape),
+            Some(last) if last != shape => {
+                self.last_shape = Some(shape);
+                self.regen_pending_since = Some(Instant::now());
+            }
+            Some(_) => {}
+        }
+
+        let Some(since) = self.regen_pending_since else {
+            return;
+        };
+        let elapsed = since.elapsed();
+        if elapsed < AUTO_REGEN_DEBOUNCE {
+            ctx.request_repaint_after(AUTO_REGEN_DEBOUNCE - elapsed);
+        } else if self.is_generating() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            self.regen_pending_since = None;
+            self.start_regeneration();
+        }
     }
 
     fn poll_generation(&mut self, ctx: &egui::Context) {
@@ -312,7 +374,15 @@ impl eframe::App for App {
             });
         });
 
-        if self.is_generating() {
+        self.maybe_auto_regenerate(ui.ctx());
+
+        // Only network-bound generation is slow enough to warrant a blocking
+        // modal; local generation is instant and would just flash it.
+        if self
+            .generation_task
+            .as_ref()
+            .is_some_and(|task| task.uses_random_org)
+        {
             show_generation_modal(ui.ctx());
         }
         if let Some((label, _)) = &self.copy_feedback {
@@ -323,6 +393,8 @@ impl eframe::App for App {
 
 struct GenerationTask {
     receiver: Receiver<GeneratedCredentials>,
+    /// Whether this task may block on the network (Random.org seed fetch).
+    uses_random_org: bool,
 }
 
 #[derive(Clone)]
